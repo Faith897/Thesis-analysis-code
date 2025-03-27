@@ -1,0 +1,384 @@
+# Load required libraries
+library(xlsx)
+library(dplyr)  # For data manipulation
+library(tidyr)
+library(ggplot2)
+library(psych)
+library(corrplot)
+library(stats)
+library(nnet)   # For multinom function 
+library(caret)  # For stratified k-fold cross-validation
+library(MASS)   # For multivariate logistic regression and For mvrnorm
+library(car)    # For checking multicollinearity 
+library(MCMCpack)  # For rwish
+library(glmnet)
+
+# Load the dataset
+multivariate_data <- read.xlsx('D:\\MultivariateData.xlsx', sheetName = 'Data')
+
+# Load the codebook for factor conversion
+code_book <- read.xlsx('D:\\MultivariateData.xlsx', sheetName = 'CODES')
+
+# Function to extract categorical labels from code book
+extract_labels <- function(code_col) {
+  labels <- na.omit(code_col)
+  labels <- setNames(as.character(gsub(".*=", "", labels)), 
+                     as.character(gsub("=.*", "", labels)))
+  return(labels)
+}
+
+# Convert categorical columns to factors using code book labels
+columns_to_factor <- colnames(multivariate_data)[-1]  # Exclude ResponseID
+# Iterate through each column and apply factor encoding
+for (col in columns_to_factor) {
+  if (col %in% colnames(code_book)) {
+    labels <- extract_labels(code_book[[col]])
+    if (length(labels) > 0) {
+      multivariate_data[[col]] <- factor(multivariate_data[[col]], 
+                                         levels = names(labels), 
+                                         labels = labels)
+    }
+  }
+}
+multivariate_data[["Exposure.to.violent.crime."]] <- factor(multivariate_data[["Exposure.to.violent.crime."]], 
+                                                            levels = c(0, 1), 
+                                                            labels = c("No", "Yes"))
+
+str(multivariate_data)
+
+# -------------------- Descriptive Statistics --------------------
+summary_stats <- multivariate_data %>%
+  dplyr::select(-ResponseID) %>%  # Remove ResponseID column
+  summarise(across(where(is.numeric), list(mean = mean, sd = sd, min = min, max = max), na.rm = TRUE)) %>%
+  pivot_longer(cols = everything(), names_to = c("Variable", "Statistic"), names_sep = "_") %>%
+  pivot_wider(names_from = Statistic, values_from = value)
+
+
+summary_stats
+
+# -------------------- Visualization --------------------
+# Age distribution
+ggplot(multivariate_data, aes(x = Age)) +
+  geom_histogram(bins = 20, fill = "skyblue", color = "black") +
+  theme_minimal() +
+  labs(title = "Age Distribution", x = "Age", y = "Frequency")
+
+# Diabetes prevalence by Income
+ggplot(multivariate_data, aes(x = Income, fill = Diabetes)) +
+  geom_bar(position = "fill") +
+  theme_minimal() +
+  labs(title = "Diabetes Prevalence by Income Level", x = "Income", y = "Proportion")
+
+# Obesity and Chronic Diseases
+ggplot(multivariate_data, aes(x = Obese, fill = Cardiovascular.Diseases..CVD..)) +
+  geom_bar(position = "fill") +
+  theme_minimal() +
+  labs(title = "Obesity and Cardiovascular Diseases", x = "Obese", y = "Proportion")
+
+# Smoking and Mental Health Disorders
+ggplot(multivariate_data, aes(x = Smoking, fill = Mental.Health.Disorders.)) +
+  geom_bar(position = "fill") +
+  theme_minimal() +
+  labs(title = "Smoking and Mental Health Disorders", x = "Smoking", y = "Proportion")
+
+# Define response variables (binary health outcomes)
+response_vars <- c("Cardiovascular.Diseases..CVD..", "Diabetes", "Any.Chronic.Respiratory.Diseases", 
+                   "Obese", "Mental.Health.Disorders.", "Chronic.Kidney.Disease..CKD.")
+
+# Define explanatory variables (SDOH factors)
+explanatory_vars <- c("Age", "Income", "Education.Level", "Employment", "Informal.Housing", 
+                      "Any.form.of.food.insecurity", "Does.regular.physical.exercise", 
+                      "Smoking", "Exposure.to.air.pollution", "Exposure.to.violent.crime.")
+
+# ___________________ Testing Model Assumptions ___________________________
+# Independent Observations: No specific test needed unless clustered data 
+# is suspected.
+
+# Exclude Response ID
+multivariate_data <- multivariate_data[, !(names(multivariate_data) %in% "Response ID")]
+
+# 1. Multicollinearity Check: Variance Inflation Factor (VIF)
+# Model for Cardiovascular Diseases (CVD)
+vif_model_CVD <- glm(as.formula(paste("Cardiovascular.Diseases..CVD.. ~", paste(explanatory_vars, collapse = " + "))), 
+                     data = multivariate_data, 
+                     family = binomial)
+vif_results_CVD <- vif(vif_model_CVD)
+vif_results_CVD
+
+# Model for Diabetes
+vif_model_Diabetes <- glm(as.formula(paste("Diabetes ~", paste(explanatory_vars, collapse = " + "))), 
+                          data = multivariate_data, 
+                          family = binomial)
+vif_results_Diabetes <- vif(vif_model_Diabetes)
+vif_results_Diabetes
+
+# Model for Any Chronic Respiratory Diseases
+vif_model_Respiratory <- glm(as.formula(paste("Any.Chronic.Respiratory.Diseases ~", paste(explanatory_vars, collapse = " + "))), 
+                             data = multivariate_data, 
+                             family = binomial)
+vif_results_Respiratory <- vif(vif_model_Respiratory)
+vif_results_Respiratory
+
+# Model for Obesity
+vif_model_Obese <- glm(as.formula(paste("Obese ~", paste(explanatory_vars, collapse = " + "))), 
+                       data = multivariate_data, 
+                       family = binomial)
+
+vif_results_Obese <- vif(vif_model_Obese)
+vif_results_Obese
+
+# Model for Mental Health Disorders
+vif_model_Mental <- glm(as.formula(paste("Mental.Health.Disorders. ~", paste(explanatory_vars, collapse = " + "))), 
+                        data = multivariate_data, 
+                        family = binomial)
+
+vif_results_Mental <- vif(vif_model_Mental)
+vif_results_Mental
+
+# Model for Chronic Kidney Disease (CKD)
+vif_model_CKD <- glm(as.formula(paste("Chronic.Kidney.Disease..CKD. ~", paste(explanatory_vars, collapse = " + "))), 
+                     data = multivariate_data, 
+                     family = binomial)
+vif_results_CKD <- vif(vif_model_CKD)
+vif_results_CKD
+
+# 2. Linearity in the Logit: Box-Tidwell Test (Only for Continuous Variables)
+# Identify numeric predictor variables
+continuous_vars <- multivariate_data %>% select_if(is.numeric) %>% colnames()
+
+
+# Create transformed log interaction terms for each continuous variable
+for (var in continuous_vars) {
+  if (!(var %in% response_vars)) {  # Check if var is NOT in response_vars
+    multivariate_data[[paste0(var, "_log")]] <- multivariate_data[[var]] * log(multivariate_data[[var]] + 1)  # Adding 1 to avoid log(0)
+  }
+}
+
+# Fit Box-Tidwell test model with transformed variables
+# Update the explanatory variables list (exclude response variables, include log terms)
+explanatory_vars_ <- setdiff(names(multivariate_data), response_vars)
+
+# Fit Box-Tidwell test model with transformed variables
+box_tidwell_model <- glm(as.formula(paste("Diabetes ~", paste(explanatory_vars_, collapse = " + "))), 
+                         data = multivariate_data, 
+                         family = binomial)
+
+
+# Box-Tidwell Test Results
+summary(box_tidwell_model)
+
+# 3. Outlier Detection: Boxplot for Each Continuous Predictor
+for (var in continuous_vars) {
+  if (var != "Diabetes") {  # Avoid plotting dependent variable
+    print(ggplot(multivariate_data, aes_string(y = var)) +
+            geom_boxplot() +
+            theme_minimal() +
+            ggtitle(paste("Boxplot of", var)))
+  }
+}
+
+# 4. Detect Influential Observations using Cook’s Distance
+model <- glm(Diabetes ~ ., data = multivariate_data, family = binomial)
+cooks_distance <- cooks.distance(model)
+
+# Identify influential observations (Threshold: 4/n)
+influential <- which(cooks_distance > (4 / nrow(multivariate_data)))
+
+print("Influential Observations based on Cook's Distance:")
+influential
+
+
+# -------------------- Multivariate Logistic Regression --------------------
+# Fit multivariate logistic regression models for each response variable
+mlr_models <- lapply(response_vars, function(resp) {
+  formula <- as.formula(paste(resp, "~", paste(explanatory_vars, collapse = " + ")))
+  model <- glm(formula, data = multivariate_data, family = binomial(link = "logit"))
+  return(model)
+})
+
+# Summarize model results
+names(mlr_models) <- response_vars
+lapply(mlr_models, summary)
+
+# Perform stratified k-fold cross-validation
+set.seed(123)
+
+cv_results <- lapply(mlr_models, function(model) {
+  train_control <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = twoClassSummary)
+  train(formula(model), data = multivariate_data, method = "glm", family = binomial, trControl = train_control, metric = "ROC")
+})
+
+# Print cross-validation results
+lapply(cv_results, function(result) result$results)
+
+
+# Most of the coeffients across the models are not statistically significant. 
+# Another approach would be to try regularisation
+# Convert categorical variables to dummy variables
+X <- model.matrix(as.formula(paste("~", paste(explanatory_vars, collapse = " + "))), data = multivariate_data)[, -1]  # Remove intercept
+y_list <- lapply(response_vars, function(resp) as.numeric(multivariate_data[[resp]]))
+
+# Fit LASSO logistic regression for each response variable with cross-validation
+lasso_models <- lapply(y_list, function(y) {
+  cv_fit <- cv.glmnet(X, y, family = "binomial", alpha = 1, nfolds = 10)  # 10-fold CV
+  return(cv_fit)
+})
+
+# Summarize optimal lambda values
+names(lasso_models) <- response_vars
+lasso_summary <- lapply(lasso_models, function(model) {
+  list(lambda_min = model$lambda.min, lambda_1se = model$lambda.1se)
+})
+
+# Perform stratified k-fold cross-validation
+cv_results <- lapply(response_vars, function(resp) {
+  y <- as.factor(multivariate_data[[resp]])  # Ensure it's a factor
+  df <- data.frame(y, X)  # Combine response with predictors
+  
+  train_control <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = twoClassSummary)
+  
+  train(y ~ ., data = df, method = "glmnet", family = "binomial", trControl = train_control, metric = "ROC",
+        tuneGrid = expand.grid(alpha = 1, lambda = lasso_models[[resp]]$lambda.min))  # Use LASSO (alpha = 1)
+})
+
+# Print cross-validation results (AUC values)
+cv_summary <- lapply(cv_results, function(result) result$results)
+
+list(lasso_summary = lasso_summary, cv_summary = cv_summary)
+
+
+# Extract selected predictors (non-zero coefficients) from each lasso model at lambda.min
+selected_vars_list <- lapply(response_vars, function(resp) {
+  # Get the coefficients at the optimal lambda value
+  coefs <- coef(lasso_models[[resp]], s = "lambda.min")
+  # Identify predictors with nonzero coefficients; convert sparse matrix to a vector
+  selected <- rownames(coefs)[as.vector(coefs) != 0]
+  # Remove the intercept from the list if present
+  selected <- selected[selected != "(Intercept)"]
+  return(selected)
+})
+names(selected_vars_list) <- response_vars
+
+# Optional: inspect the selected variables for each response
+print(selected_vars_list)
+
+# Refit logistic regression models using only the selected predictors from the model matrix X
+refit_models <- lapply(response_vars, function(resp) {
+  selected_vars <- selected_vars_list[[resp]]
+  
+  if (length(selected_vars) == 0) {
+    message("No predictors selected for ", resp, ". Fitting intercept-only model.")
+    df <- data.frame(y = multivariate_data[[resp]])
+    formula_str <- "y ~ 1"
+  } else {
+    # Create a new data frame: response variable and the selected columns from X
+    df <- data.frame(y = multivariate_data[[resp]], X[, selected_vars, drop = FALSE])
+    # Build the formula using the column names from df (excluding the response column)
+    formula_str <- paste("y ~", paste(colnames(df)[-1], collapse = " + "))
+  }
+  
+  # Fit the logistic regression model
+  model <- glm(as.formula(formula_str), data = df, family = binomial(link = "logit"))
+  return(model)
+})
+
+
+names(refit_models) <- response_vars
+
+# Summarize the refitted models
+lapply(refit_models, summary)
+
+
+
+# -------------------- Canonical Correlation Analysis (CCA) --------------------
+# Convert factor variables to numeric
+response_vars_data <- multivariate_data %>% 
+  dplyr::select(all_of(response_vars)) %>%
+  mutate(across(everything(), ~as.numeric(.)))
+
+explanatory_vars_data <- multivariate_data %>%
+  dplyr::select(all_of(explanatory_vars)) %>%
+  mutate(across(everything(), ~as.numeric(.)))
+
+# Perform Canonical Correlation Analysis (CCA)
+cca_result <- cancor(explanatory_vars_data, response_vars_data)
+
+
+cca_result
+
+
+# Extract Canonical Correlations
+cca_result$cor
+
+# Standardized Canonical Coefficients
+cca_result$xcoef  # For explanatory variables
+cca_result$ycoef  # For response variables
+
+# Compute Canonical Redundancy Index (Variance Explained)
+canonical_redundancy <- function(correlations, coefs, dataset) {
+  loadings <- as.matrix(dataset) %*% coefs
+  variance_explained <- apply(loadings^2, 2, sum) / sum(apply(dataset^2, 2, sum))
+  return(variance_explained)
+}
+
+# Variance explained by each canonical variable
+variance_explained_X <- canonical_redundancy(cca_result$cor, cca_result$xcoef, explanatory_vars_data)
+variance_explained_Y <- canonical_redundancy(cca_result$cor, cca_result$ycoef, response_vars_data)
+
+# Print Variance Explained
+variance_explained_X
+variance_explained_Y
+
+# Scree plot of canonical correlations
+scree_plot <- data.frame(Canonical_Root = 1:length(cca_result$cor), Correlation = cca_result$cor)
+ggplot(scree_plot, aes(x = Canonical_Root, y = Correlation)) +
+  geom_point(size = 3, color = "blue") +
+  geom_line(color = "blue") +
+  theme_minimal() +
+  labs(title = "Canonical Correlations Scree Plot", x = "Canonical Root", y = "Correlation")
+
+
+
+# -------------------- Covariate Distribution Simulation using Wishart Distribution --------------------
+set.seed(123)  # Ensure reproducibility
+# Define parameters
+p <- ncol(explanatory_vars_data)  # Number of covariates
+n <- nrow(multivariate_data)  # Number of observations
+# Compute empirical covariance matrix and ensure positive definiteness
+empirical_cov <- cov(as.matrix(explanatory_vars_data), use = "complete.obs")
+scale_matrix <- empirical_cov + diag(p) * 0.1  # Add small positive value to diagonal
+
+# Generate Wishart-distributed covariance matrices with different degrees of freedom
+wishart_samples <- lapply(seq(100, 500, by = 100), function(df) {
+  rwish(df, scale_matrix) / df  # Normalize by degrees of freedom
+})
+# Ensure response_vars is a character vector
+response_vars <- names(response_vars_data)
+# Evaluate impact of different covariance structures
+simulated_results <- lapply(wishart_samples, function(simulated_cov) {
+  # Generate new explanatory variables using a multivariate normal distribution
+  simulated_explanatory <- mvrnorm(n = n, 
+                                   mu = colMeans(explanatory_vars_data), 
+                                   Sigma = simulated_cov)
+  simulated_explanatory <- as.data.frame(simulated_explanatory)
+  colnames(simulated_explanatory) <- colnames(explanatory_vars_data)
+  # Fit logistic regression models for each response variable
+  simulated_models <- lapply(response_vars, function(resp) {
+    formula <- as.formula(paste0(resp, " ~ ", paste(colnames(simulated_explanatory), collapse = " + ")))
+    glm(formula, 
+        data = cbind(simulated_explanatory, multivariate_data[, response_vars, drop = FALSE]), 
+        family = binomial(link = "logit"))
+  })
+  # Extract model performance metrics (AIC, BIC, log-likelihood)
+  model_performance <- lapply(simulated_models, function(model) {
+    list(AIC = AIC(model), BIC = BIC(model), logLik = as.numeric(logLik(model)))
+  })
+  return(model_performance)
+})
+
+# Assign names to the simulation results
+names(simulated_results) <- paste0("DF_", seq(100, 500, by = 100))
+
+# Print or inspect the results
+simulated_results
+
